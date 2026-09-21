@@ -25,7 +25,7 @@ variables:
   # variables de entorno
   ACR_NAME: 'acrgrp14' # colocar el nombre de tu ACR
   IMAGE_NAME: 'image-grp14-sumativa2' # colocar el nombre de imagen
-  SERVICE_CONNECTION_NAME: 'sc-acr-grp14-sumativa2' # colocar nombre del service connection ubicado en docker registry-- azure container registry
+  ACR_SERVICE_CONNECTION: 'sc-acr-grp14-sumativa2' # colocar nombre del service connection ubicado en docker registry-- azure container registry
 
 stages:
   - stage: BuildValidatePush
