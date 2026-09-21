@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DevOps · Docker · Nginx</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #f9fafb; }
+    main { width: min(760px, calc(100% - 32px)); background: #1f2937; border: 1px solid #374151; border-radius: 18px; padding: 28px; box-sizing: border-box; }
+    h1 { margin-top: 0; }
+    .meta { display: grid; gap: 8px; margin: 18px 0; padding: 16px; background: #111827; border-radius: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { border: 0; border-radius: 10px; padding: 11px 15px; cursor: pointer; font-weight: 700; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #030712; padding: 14px; border-radius: 12px; min-height: 70px; }
+    small { color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Contenedor Nginx desplegado con Azure DevOps</h1>
+    <p>Esta página permite validar de forma visual el flujo <strong>cambio → build → push → deployment → health check</strong>.</p>
+
+    <section class="meta">
+      <div><strong>Build ID:</strong> __BUILD_ID__</div>
+      <div><strong>Commit:</strong> __SOURCE_COMMIT__</div>
+    </section>
+
+    <div class="actions">
+      <button id="health" type="button">Validar /health</button>
+      <button id="info" type="button">Consultar /api/info</button>
+      <button id="clear" type="button">Limpiar salida</button>
+    </div>
+
+    <h2>Resultado</h2>
+    <pre id="output">Selecciona una validación.</pre>
+    <small>Tip: cambia el mensaje de <code>/api/info</code> en <code>default.conf</code>, haz push a main y observa el redeploy automático.</small>
+  </main>
+
+  <script>
+    const output = document.getElementById('output');
+
+    async function request(path) {
+      output.textContent = `Consultando ${path}...`;
+      try {
+        const response = await fetch(path, { cache: 'no-store' });
+        const body = await response.text();
+        output.textContent = `HTTP ${response.status}\n${body}`;
+      } catch (error) {
+        output.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    document.getElementById('health').addEventListener('click', () => request('/health'));
+    document.getElementById('info').addEventListener('click', () => request('/api/info'));
+    document.getElementById('clear').addEventListener('click', () => { output.textContent = 'Salida limpia.'; });
+  </script>
+</body>
+</html>
