@@ -9,11 +9,18 @@
 trigger: none
 pr: none
 
+variables:
+  # variables de entorno
+  ACR_NAME: 'acrgrp14' # colocar el nombre de tu ACR
+  IMAGE_NAME: 'image-grp14-sumativa2' # colocar el nombre de imagen
+  ACR_PULL_USERNAME: 'acrgrp14'
+  ACR_PULL_PASSWORD: '9WzqBk1OpxMgonEZEjHETM36kwdYVjH2Q0An525mNVLYosyjW0yuJQQJ99CIACHrzpqEqg7NAAACAZCRq7uw'
+
 resources:
   pipelines:
     - pipeline: imageBuild
       # Debe coincidir exactamente con el nombre del pipeline de build en Azure DevOps.
-      source: '<TU_PIPELINE_BUILD>'
+      source: 'pl-grp14-sumativa2'
       trigger:
         branches:
           include:
@@ -34,7 +41,7 @@ stages:
       - deployment: DeployToVM
         displayName: 'Actualizar contenedor en VM'
         environment:
-          name: '<TU_ENVIRONMENT_VM>'
+          name: 'env-grp14-sumativa2'
           resourceType: VirtualMachine
         strategy:
           runOnce:
