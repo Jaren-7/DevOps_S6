@@ -1,0 +1,266 @@
+# PLANTILLA GENÉRICA PARA ESTUDIANTES
+# Antes de crear el pipeline, reemplaza SOLO los marcadores estáticos:
+#   <TU_PIPELINE_BUILD>   = nombre exacto de tu pipeline Build/Push
+#   <TU_ENVIRONMENT_VM>  = nombre exacto de tu Environment con la VM registrada
+# Los datos de ACR e imagen se configuran como variables en Azure DevOps.
+#
+# Este pipeline se ejecuta solamente cuando finaliza correctamente
+# el pipeline de construcción y publicación de la imagen.
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+    - pipeline: imageBuild
+      # Debe coincidir exactamente con el nombre del pipeline de build en Azure DevOps.
+      source: '<TU_PIPELINE_BUILD>'
+      trigger:
+        branches:
+          include:
+            - main
+
+# Variables configuradas directamente en Azure DevOps > Pipeline > Variables:
+# ACR_NAME
+# IMAGE_NAME
+# ACR_PULL_USERNAME (secret)
+# ACR_PULL_PASSWORD (secret)
+#
+# Este pipeline utiliza ACR_NAME, IMAGE_NAME, ACR_PULL_USERNAME y ACR_PULL_PASSWORD.
+
+stages:
+  - stage: Deploy
+    displayName: 'Despliegue automático a VM'
+    jobs:
+      - deployment: DeployToVM
+        displayName: 'Actualizar contenedor en VM'
+        environment:
+          name: '<TU_ENVIRONMENT_VM>'
+          resourceType: VirtualMachine
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - bash: |
+                    set -Eeuo pipefail
+
+                    echo 'Validando variables requeridas...'
+                    for var_name in ACR_NAME IMAGE_NAME ACR_PULL_USERNAME ACR_PULL_PASSWORD; do
+                      value="${!var_name:-}"
+                      if [[ -z "$value" || "$value" == '$('* ]]; then
+                        echo "##vso[task.logissue type=error]Variable requerida no definida: ${var_name}"
+                        exit 1
+                      fi
+
+                      case "$var_name" in
+                        ACR_PULL_USERNAME|ACR_PULL_PASSWORD)
+                          echo "OK: ${var_name} = ***"
+                          ;;
+                        *)
+                          echo "OK: ${var_name}"
+                          ;;
+                      esac
+                    done
+                  displayName: 'Validar variables de Azure DevOps'
+                  env:
+                    ACR_NAME: $(ACR_NAME)
+                    IMAGE_NAME: $(IMAGE_NAME)
+                    ACR_PULL_USERNAME: $(ACR_PULL_USERNAME)
+                    ACR_PULL_PASSWORD: $(ACR_PULL_PASSWORD)
+
+                - bash: |
+                    set -Eeuo pipefail
+
+                    echo 'Validando herramientas requeridas en la VM...'
+
+                    if ! command -v curl >/dev/null 2>&1; then
+                      echo 'curl no está instalado. Instalando...'
+                      sudo apt-get update
+                      sudo apt-get install -y curl ca-certificates
+                    else
+                      echo "curl ya está instalado: $(curl --version | head -n1)"
+                    fi
+
+                    if ! command -v docker >/dev/null 2>&1; then
+                      echo 'Docker no está instalado. Instalando desde el repositorio oficial...'
+
+                      if [[ ! -r /etc/os-release ]]; then
+                        echo '##vso[task.logissue type=error]No fue posible identificar el sistema operativo.'
+                        exit 1
+                      fi
+
+                      . /etc/os-release
+                      case "${ID:-}" in
+                        ubuntu|debian) ;;
+                        *)
+                          echo "##vso[task.logissue type=error]Sistema operativo no soportado automáticamente: ${ID:-desconocido}"
+                          exit 1
+                          ;;
+                      esac
+
+                      sudo apt-get update
+                      sudo apt-get install -y ca-certificates curl
+                      sudo install -m 0755 -d /etc/apt/keyrings
+                      sudo curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
+                      sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+                      ARCH="$(dpkg --print-architecture)"
+                      CODENAME="${VERSION_CODENAME:-}"
+                      if [[ -z "$CODENAME" ]]; then
+                        echo '##vso[task.logissue type=error]No se pudo determinar VERSION_CODENAME.'
+                        exit 1
+                      fi
+
+                      echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${CODENAME} stable" \
+                        | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+                      sudo apt-get update
+                      sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+                    else
+                      echo "Docker ya está instalado: $(docker --version)"
+                    fi
+
+                    if command -v systemctl >/dev/null 2>&1; then
+                      sudo systemctl enable --now docker
+                    fi
+
+                    echo 'Validando funcionamiento de Docker...'
+                    sudo docker version
+                    sudo docker info >/dev/null
+                    echo 'Docker operativo.'
+                  displayName: 'Verificar e instalar dependencias'
+
+                - bash: |
+                    set -Eeuo pipefail
+
+                    : "${ACR_PULL_USERNAME:?Debes definir ACR_PULL_USERNAME como variable secreta}"
+                    : "${ACR_PULL_PASSWORD:?Debes definir ACR_PULL_PASSWORD como variable secreta}"
+                    : "${UPSTREAM_RUN_ID:?El deployment debe provenir de una ejecución exitosa del pipeline de imagen}"
+
+                    REGISTRY="${ACR_NAME}.azurecr.io"
+                    IMAGE_TAG="${UPSTREAM_RUN_ID}"
+                    IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+                    CONTAINER="$(printf '%s' "$IMAGE_NAME" | sed 's#[^a-zA-Z0-9_.-]#-#g')"
+                    HOST_PORT='80'
+                    CONTAINER_PORT='80'
+                    RESTART_POLICY='unless-stopped'
+                    HEALTHCHECK_PATH='/health'
+                    INFO_PATH='/api/info'
+                    HEALTHCHECK_RETRIES='12'
+                    HEALTHCHECK_DELAY_SECONDS='5'
+
+                    logout_registry() {
+                      sudo docker logout "$REGISTRY" >/dev/null 2>&1 || true
+                    }
+                    trap logout_registry EXIT
+
+                    echo "Pipeline origen: ${UPSTREAM_PIPELINE_NAME:-desconocido}"
+                    echo "Run origen:      ${IMAGE_TAG}"
+                    echo "Imagen objetivo: ${IMAGE_REF}"
+
+                    echo 'Autenticando contra ACR...'
+                    printf '%s' "$ACR_PULL_PASSWORD" \
+                      | sudo docker login "$REGISTRY" \
+                          --username "$ACR_PULL_USERNAME" \
+                          --password-stdin >/dev/null
+
+                    # Primero se descarga la nueva imagen.
+                    # Si el pull falla, el contenedor actual no se modifica.
+                    echo 'Descargando y validando la nueva imagen...'
+                    sudo docker pull "$IMAGE_REF"
+                    sudo docker image inspect "$IMAGE_REF" >/dev/null
+                    echo 'Nueva imagen disponible localmente.'
+
+                    PREVIOUS_IMAGE=''
+                    if sudo docker ps -a --format '{{.Names}}' | grep -Fxq "$CONTAINER"; then
+                      PREVIOUS_IMAGE="$(sudo docker inspect --format='{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true)"
+                      echo "Contenedor existente detectado. Imagen previa: ${PREVIOUS_IMAGE:-desconocida}"
+                      echo 'Eliminando contenedor anterior...'
+                      sudo docker rm -f "$CONTAINER"
+                    else
+                      echo 'No existe un contenedor previo con ese nombre.'
+                    fi
+
+                    echo 'Creando nuevo contenedor...'
+                    sudo docker run -d \
+                      --name "$CONTAINER" \
+                      --restart "$RESTART_POLICY" \
+                      -p "${HOST_PORT}:${CONTAINER_PORT}" \
+                      --label "devops.pipeline.run=${IMAGE_TAG}" \
+                      --label "devops.image=${IMAGE_REF}" \
+                      "$IMAGE_REF"
+
+                    echo "Validando endpoint ${HEALTHCHECK_PATH}..."
+                    healthy='false'
+                    for attempt in $(seq 1 "$HEALTHCHECK_RETRIES"); do
+                      docker_health="$(sudo docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+                      echo "Intento ${attempt}/${HEALTHCHECK_RETRIES} - estado Docker: ${docker_health:-sin información}"
+
+                      if curl -fsS "http://127.0.0.1:${HOST_PORT}${HEALTHCHECK_PATH}" >/dev/null; then
+                        healthy='true'
+                        break
+                      fi
+                      sleep "$HEALTHCHECK_DELAY_SECONDS"
+                    done
+
+                    if [[ "$healthy" != 'true' ]]; then
+                      echo '##vso[task.logissue type=error]El nuevo contenedor no superó la validación funcional.'
+                      echo 'Últimos logs del contenedor:'
+                      sudo docker logs --tail 100 "$CONTAINER" || true
+                      sudo docker rm -f "$CONTAINER" || true
+
+                      if [[ -n "$PREVIOUS_IMAGE" ]] && sudo docker image inspect "$PREVIOUS_IMAGE" >/dev/null 2>&1; then
+                        echo "Intentando rollback automático a: $PREVIOUS_IMAGE"
+                        sudo docker run -d \
+                          --name "$CONTAINER" \
+                          --restart "$RESTART_POLICY" \
+                          -p "${HOST_PORT}:${CONTAINER_PORT}" \
+                          --label 'devops.rollback=true' \
+                          "$PREVIOUS_IMAGE"
+
+                        sleep "$HEALTHCHECK_DELAY_SECONDS"
+                        if curl -fsS "http://127.0.0.1:${HOST_PORT}${HEALTHCHECK_PATH}" >/dev/null; then
+                          echo 'Rollback ejecutado y validado correctamente.'
+                        else
+                          echo '##vso[task.logissue type=error]El rollback tampoco superó el health check.'
+                        fi
+                      else
+                        echo 'No existe una imagen previa local disponible para rollback.'
+                      fi
+
+                      exit 1
+                    fi
+
+                    echo "Validando endpoint informativo ${INFO_PATH}..."
+                    curl -fsS "http://127.0.0.1:${HOST_PORT}${INFO_PATH}"
+                    echo
+
+                    echo 'Contenedor actualizado correctamente.'
+                    sudo docker ps --filter "name=${CONTAINER}"
+
+                    echo 'Limpiando imágenes dangling...'
+                    sudo docker image prune -f
+                  displayName: 'Pull, reemplazo, validación y rollback'
+                  env:
+                    ACR_NAME: $(ACR_NAME)
+                    IMAGE_NAME: $(IMAGE_NAME)
+                    ACR_PULL_USERNAME: $(ACR_PULL_USERNAME)
+                    ACR_PULL_PASSWORD: $(ACR_PULL_PASSWORD)
+                    UPSTREAM_RUN_ID: $(resources.pipeline.imageBuild.runID)
+                    UPSTREAM_PIPELINE_NAME: $(resources.pipeline.imageBuild.pipelineName)
+
+                - bash: |
+                    echo 'Despliegue finalizado correctamente.'
+                    echo 'Environment: <TU_ENVIRONMENT_VM>'
+                    echo "Contenedor: ${IMAGE_NAME}"
+                    echo 'Valida la aplicación desde la IP pública o DNS de la VM.'
+                    echo 'Puerto publicado: 80'
+                    echo 'Endpoints disponibles:'
+                    echo '  /         -> interfaz de demostración'
+                    echo '  /health   -> health check'
+                    echo '  /api/info -> información entregada por Nginx'
+                  displayName: 'Resumen del despliegue'
+                  env:
+                    IMAGE_NAME: $(IMAGE_NAME)

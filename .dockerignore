@@ -1,0 +1,7 @@
+.git
+.gitignore
+.azure-pipelines
+*.md
+*.log
+*.zip
+node_modules

@@ -1,0 +1,159 @@
+name: 'image-$(Date:yyyyMMdd).$(Rev:r)'
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - Dockerfile
+      - default.conf
+      - html/**
+      - azure-pipeline-push-image-acr.yml
+
+pr: none
+
+# Variables configuradas directamente en Azure DevOps > Pipeline > Variables:
+# ACR_NAME
+# IMAGE_NAME
+# ACR_SERVICE_CONNECTION
+#
+# Las credenciales ACR_PULL_USERNAME y ACR_PULL_PASSWORD son utilizadas
+# solamente por el pipeline de deployment y deben configurarse como secret.
+
+stages:
+  - stage: BuildValidatePush
+    displayName: 'Build, validación y publicación de imagen'
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Construir, probar y publicar en ACR'
+        pool:
+          vmImage: 'ubuntu-latest'
+
+        steps:
+          - checkout: self
+            clean: true
+
+          - bash: |
+              set -Eeuo pipefail
+
+              echo 'Validando variables requeridas...'
+              for var_name in ACR_NAME IMAGE_NAME ACR_SERVICE_CONNECTION; do
+                value="${!var_name:-}"
+                if [[ -z "$value" || "$value" == '$('* ]]; then
+                  echo "##vso[task.logissue type=error]Variable requerida no definida: ${var_name}"
+                  exit 1
+                fi
+                echo "OK: ${var_name}"
+              done
+            displayName: 'Validar variables de Azure DevOps'
+            env:
+              ACR_NAME: $(ACR_NAME)
+              IMAGE_NAME: $(IMAGE_NAME)
+              ACR_SERVICE_CONNECTION: $(ACR_SERVICE_CONNECTION)
+
+          - bash: |
+              set -Eeuo pipefail
+
+              echo 'Validando archivos requeridos...'
+              required_files=(
+                "$(Build.SourcesDirectory)/Dockerfile"
+                "$(Build.SourcesDirectory)/default.conf"
+                "$(Build.SourcesDirectory)/html/index.html"
+              )
+
+              for file in "${required_files[@]}"; do
+                if [[ ! -f "$file" ]]; then
+                  echo "##vso[task.logissue type=error]No se encontró el archivo requerido: $file"
+                  exit 1
+                fi
+                echo "OK: $file"
+              done
+
+              echo 'Archivos base validados correctamente.'
+            displayName: 'Validar archivos de origen'
+
+          - task: Docker@2
+            displayName: 'Construir imagen Docker'
+            inputs:
+              command: 'build'
+              containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+              repository: '$(IMAGE_NAME)'
+              dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              buildContext: '$(Build.SourcesDirectory)'
+              tags: |
+                $(Build.BuildId)
+                latest
+              arguments: >-
+                --build-arg BUILD_ID=$(Build.BuildId)
+                --build-arg SOURCE_COMMIT=$(Build.SourceVersion)
+
+          - bash: |
+              set -Eeuo pipefail
+
+              IMAGE_REF="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:$(Build.BuildId)"
+              CONTAINER_NAME="validation-$(Build.BuildId)"
+              PORT='8080'
+
+              cleanup() {
+                docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+              }
+              trap cleanup EXIT
+
+              echo "Validando configuración Nginx en $IMAGE_REF..."
+              docker run --rm "$IMAGE_REF" nginx -t
+
+              echo 'Levantando contenedor temporal para pruebas funcionales...'
+              cleanup
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "127.0.0.1:${PORT}:80" \
+                "$IMAGE_REF"
+
+              echo 'Esperando endpoint /health...'
+              ready='false'
+              for attempt in $(seq 1 12); do
+                if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null; then
+                  ready='true'
+                  break
+                fi
+                echo "Intento ${attempt}/12: servicio aún no disponible"
+                sleep 2
+              done
+
+              if [[ "$ready" != 'true' ]]; then
+                echo '##vso[task.logissue type=error]La imagen no superó la validación HTTP.'
+                docker logs "$CONTAINER_NAME" || true
+                exit 1
+              fi
+
+              echo 'Validando endpoint /api/info...'
+              curl -fsS "http://127.0.0.1:${PORT}/api/info"
+              echo
+
+              echo 'Imagen validada correctamente antes de publicarla.'
+            displayName: 'Validar imagen y aplicación'
+            env:
+              ACR_NAME: $(ACR_NAME)
+              IMAGE_NAME: $(IMAGE_NAME)
+
+          - task: Docker@2
+            displayName: 'Publicar imagen en Azure Container Registry'
+            inputs:
+              command: 'push'
+              containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+              repository: '$(IMAGE_NAME)'
+              tags: |
+                $(Build.BuildId)
+                latest
+
+          - bash: |
+              set -Eeuo pipefail
+              echo 'Publicación completada.'
+              echo "Imagen versionada: ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:$(Build.BuildId)"
+              echo "Alias latest:       ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+              echo 'El pipeline de despliegue podrá iniciarse solo después de este punto.'
+            displayName: 'Resumen de imagen publicada'
+            env:
+              ACR_NAME: $(ACR_NAME)
+              IMAGE_NAME: $(IMAGE_NAME)
