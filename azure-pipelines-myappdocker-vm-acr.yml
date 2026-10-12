@@ -11,16 +11,16 @@ pr: none
 
 variables:
   # variables de entorno
-  ACR_NAME: 'acrgrp14' # colocar el nombre de tu ACR
-  IMAGE_NAME: 'image-grp14-sumativa2' # colocar el nombre de imagen
-  ACR_PULL_USERNAME: 'acrgrp14'
-  ACR_PULL_PASSWORD: '9WzqBk1OpxMgonEZEjHETM36kwdYVjH2Q0An525mNVLYosyjW0yuJQQJ99CIACHrzpqEqg7NAAACAZCRq7uw'
+  ACR_NAME: 'acrgrp14sumativa2' # colocar el nombre de tu ACR
+  IMAGE_NAME: 'img-grp14-sumativa2' # colocar el nombre de imagen
+  ACR_PULL_USERNAME: 'acrgrp14sumativa2'
+  ACR_PULL_PASSWORD: 'EVHVvu1lklWAyDHTXPCXBY9PGrvDJ7toc2JJzT7XFOFwdwsdmf8CJQQJ99CJACHYHv6Eqg7NAAACAZCRxIlF'
 
 resources:
   pipelines:
     - pipeline: imageBuild
       # Debe coincidir exactamente con el nombre del pipeline de build en Azure DevOps.
-      source: 'pl-grp14-sumativa2'
+      source: 'pl-acr-sumativa2'
       trigger:
         branches:
           include:
